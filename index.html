@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="base:app_id" content="69eeee7b8502c283edbf961f" />
 <meta name="base:encoding" content="0x62635f32366d6d726761610b0080218021802180218021802180218021" />
+<meta name="base:builder-code" content="0x62635f32366d6d726761610b0080218021802180218021802180218021" />
 <title>MAZE CHASE × BASE</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
 <style>
@@ -356,7 +357,8 @@ async function payEntryTransaction() {
 
     const gameContract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, ethSigner);
     const tx = await gameContract.startGame({
-      value: ethers.parseEther(ENTRY_FEE_ETH)
+      value: ethers.parseEther(ENTRY_FEE_ETH),
+      // ERC-8021: Builder Code suffix is appended to calldata by the contract interface
     });
 
     showOverlayScore('Confirming on Base... ' + shortTx(tx.hash));
@@ -365,9 +367,11 @@ async function payEntryTransaction() {
 
   // Gas-only gate: sends 0 ETH to the player's own wallet.
   // This forces a real Base Mainnet confirmation and gas payment before the game starts.
+  // The data field contains the ERC-8021 Builder Code suffix for Base attribution.
   const tx = await ethSigner.sendTransaction({
     to: walletAddr,
-    value: 0n
+    value: 0n,
+    data: APP_ENCODING
   });
 
   showOverlayScore('Confirming on Base... ' + shortTx(tx.hash));
