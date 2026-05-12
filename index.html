@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="base:app_id" content="69eeee7b8502c283edbf961f" />
+<meta name="base:encoding" content="0x62635f32366d6d726761610b0080218021802180218021802180218021" />
 <title>MAZE CHASE × BASE</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
 <style>
@@ -989,6 +990,17 @@ function scaleCanvas(){
 }
 window.addEventListener('resize', scaleCanvas);
 scaleCanvas();
+
+// ═══════════════════════════════════════════════
+//  APP ENCODING / IDENTIFIER
+// ═══════════════════════════════════════════════
+const APP_ENCODING = '0x62635f32366d6d726761610b0080218021802180218021802180218021';
+function getAppId() {
+  const hex = APP_ENCODING.startsWith('0x') ? APP_ENCODING.slice(2) : APP_ENCODING;
+  const bytes = new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+  return btoa(String.fromCharCode(...bytes));
+}
+const _appId = getAppId();
 
 // Initial render
 initGame();
