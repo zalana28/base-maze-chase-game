@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="base:app_id" content="69eeee7b8502c283edbf961f" />
+<meta name="base:encoding" content="0x62635f32366d6d726761610b0080218021802180218021802180218021" />
 <title>MAZE CHASE × BASE</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
 <style>
@@ -395,6 +396,10 @@ const ROWS = 23;
 // Tile ids
 const WALL=1,DOT=0,PWR=2,EMPTY=3,HOUSE=4;
 
+// Player movement: one grid cell every PLAYER_MOVE_INTERVAL_MS milliseconds.
+// Raise this value to slow the player down; lower it to speed them up.
+const PLAYER_MOVE_INTERVAL_MS = 140;
+
 // ═══════════════════════════════════════════════
 //  MAZE LAYOUT  (21 × 23)
 // ═══════════════════════════════════════════════
@@ -443,7 +448,7 @@ let raf=0, lastTs=0, accTime=0;
 let readyTimer=0;
 let dyingTimer=0, dyingPhase=0;
 
-const PAC_STEP = 130; // ms per cell
+// pac uses PLAYER_MOVE_INTERVAL_MS; ghosts keep their own step timer
 const GHOST_STEP=160;
 let pacAcc=0, ghostAcc=0;
 
@@ -486,7 +491,9 @@ function initGame(){
     for(let c=0;c<COLS;c++)
       if(map[r][c]===DOT||map[r][c]===PWR) totalDots++;
 
-  pac={col:10,row:16,dx:0,dy:0,ndx:-1,ndy:0,alive:true};
+  // curDx/curDy  – the direction pac is currently moving (0,0 = stationary at start)
+  // nextDx/nextDy – the buffered desired direction set by the player's last input
+  pac={col:10, row:16, curDx:0, curDy:0, nextDx:-1, nextDy:0, alive:true};
 
   ghosts=GHOST_CFG.map(cfg=>({
     ...cfg,
@@ -508,7 +515,7 @@ function initGame(){
 }
 
 function resetPositions(){
-  pac={col:10,row:16,dx:0,dy:0,ndx:-1,ndy:0,alive:true};
+  pac={col:10, row:16, curDx:0, curDy:0, nextDx:-1, nextDy:0, alive:true};
   ghosts.forEach((g,i)=>{
     g.col=GHOST_CFG[i].col; g.row=GHOST_CFG[i].row;
     g.dx=0; g.dy=-1;
@@ -523,29 +530,50 @@ function resetPositions(){
 // ═══════════════════════════════════════════════
 //  MOVEMENT
 // ═══════════════════════════════════════════════
+
+// Called by keyboard, d-pad, and swipe — the single point of input for player direction.
+// Only records the desired next direction; movement itself happens in movePac().
+function setPlayerInput(dx, dy) {
+  pac.nextDx = dx;
+  pac.nextDy = dy;
+}
+
 function movePac(){
-  // Try buffered direction first
-  let moved=false;
-  if(pac.ndx!==undefined){
-    const nc=wrapCol(pac.col+pac.ndx), nr=pac.row+pac.ndy;
-    if(canWalk(nc,nr,false,null)){
-      pac.dx=pac.ndx; pac.dy=pac.ndy;
+  // ── 1. Try to turn into the buffered (nextDx/nextDy) direction ──────────────
+  // Only commit the turn if the neighbouring cell in that direction is walkable.
+  // This is the "grid alignment" check: pac is always on a whole-cell coordinate,
+  // so there is no sub-pixel alignment to worry about.
+  if(pac.nextDx !== 0 || pac.nextDy !== 0){
+    const tc = wrapCol(pac.col + pac.nextDx);
+    const tr = pac.row + pac.nextDy;
+    if(canWalk(tc, tr, false, null)){
+      pac.curDx = pac.nextDx;
+      pac.curDy = pac.nextDy;
     }
   }
-  const nc=wrapCol(pac.col+pac.dx), nr=pac.row+pac.dy;
-  if(canWalk(nc,nr,false,null)){
-    pac.col=nc; pac.row=nr;
-    moved=true;
+
+  // ── 2. Advance one cell in the current direction ────────────────────────────
+  // If the wall ahead blocks us we simply stop rather than skipping or drifting.
+  if(pac.curDx !== 0 || pac.curDy !== 0){
+    const nc = wrapCol(pac.col + pac.curDx);
+    const nr = pac.row  + pac.curDy;
+    if(canWalk(nc, nr, false, null)){
+      pac.col = nc;
+      pac.row = nr;
+    }
+    // If the wall blocked movement we leave curDx/curDy intact so pac "leans"
+    // against the wall and will move the moment the path clears (e.g. a turn
+    // that the player already queued with nextDx/nextDy).
   }
 
-  // Eat dot/power
-  const t=map[pac.row][pac.col];
-  if(t===DOT){ map[pac.row][pac.col]=EMPTY; score+=10; dotsEaten++; updateHUD(); }
-  if(t===PWR){
-    map[pac.row][pac.col]=EMPTY; score+=50; dotsEaten++;
+  // ── 3. Collect dot / power-pellet on the cell pac just entered ───────────────
+  const t = map[pac.row][pac.col];
+  if(t === DOT){ map[pac.row][pac.col] = EMPTY; score += 10; dotsEaten++; updateHUD(); }
+  if(t === PWR){
+    map[pac.row][pac.col] = EMPTY; score += 50; dotsEaten++;
     activatePower(); updateHUD();
   }
-  if(dotsEaten>=totalDots){ triggerWin(); }
+  if(dotsEaten >= totalDots){ triggerWin(); }
 }
 
 function activatePower(){
@@ -578,7 +606,7 @@ function moveGhost(g, dt){
   let tx=g.tx, ty=g.ty;
   if(g.mode==='chase'){
     if(g.name==='Blinky'){ tx=pac.col; ty=pac.row; }
-    else if(g.name==='Pinky'){ tx=pac.col+pac.dx*4; ty=pac.row+pac.dy*4; }
+    else if(g.name==='Pinky'){ tx=pac.col+pac.curDx*4; ty=pac.row+pac.curDy*4; }
     else if(g.name==='Inky'){ tx=pac.col+2; ty=pac.row+2; }
     else { // Clyde
       if(dist(g.col,g.row,pac.col,pac.row)>8){ tx=pac.col; ty=pac.row; }
@@ -701,9 +729,10 @@ function loop(ts){
     // Ghost mode cycling (simple: scatter 7s, chase 20s)
     // (simplified – just toggle based on time)
 
-    // Move pac
+    // Move pac — fire at most once per tick; reset accumulator to 0 (not modulo)
+    // so a slow frame never causes catch-up multi-cell jumps.
     pacAcc+=dt;
-    if(pacAcc>=PAC_STEP){ pacAcc-=PAC_STEP; movePac(); }
+    if(pacAcc>=PLAYER_MOVE_INTERVAL_MS){ pacAcc=0; movePac(); }
 
     // Move ghosts
     ghostAcc+=dt;
@@ -840,12 +869,15 @@ function drawPac(dt){
 
   if(gameState!=='playing'&&gameState!=='ready') return;
 
-  // Direction angle
+  // Direction angle — use curDx/curDy; fall back to nextDx/nextDy so pac faces
+  // the queued direction even while waiting at a wall.
   let angle=0;
-  if(pac.dx===1) angle=0;
-  else if(pac.dx===-1) angle=Math.PI;
-  else if(pac.dy===1) angle=Math.PI/2;
-  else if(pac.dy===-1) angle=-Math.PI/2;
+  const faceDx = pac.curDx || pac.nextDx;
+  const faceDy = pac.curDy || pac.nextDy;
+  if(faceDx===1)       angle=0;
+  else if(faceDx===-1) angle=Math.PI;
+  else if(faceDy===1)  angle=Math.PI/2;
+  else if(faceDy===-1) angle=-Math.PI/2;
 
   const mouth=mouthAngle*Math.PI;
 
@@ -932,10 +964,12 @@ function drawGhostEyes(px,py,r,dx,dy,bg){
 }
 
 // ═══════════════════════════════════════════════
-//  KEYBOARD INPUT
+//  INPUT — keyboard, swipe, d-pad all funnel through setPlayerInput()
 // ═══════════════════════════════════════════════
+
+// Keyboard
 document.addEventListener('keydown',e=>{
-  const map2={
+  const dirMap={
     ArrowLeft:{dx:-1,dy:0},ArrowRight:{dx:1,dy:0},
     ArrowUp:{dx:0,dy:-1},ArrowDown:{dx:0,dy:1},
     a:{dx:-1,dy:0},d:{dx:1,dy:0},
@@ -943,14 +977,11 @@ document.addEventListener('keydown',e=>{
     A:{dx:-1,dy:0},D:{dx:1,dy:0},
     W:{dx:0,dy:-1},S:{dx:0,dy:1},
   };
-  const dir=map2[e.key];
-  if(dir){
-    e.preventDefault();
-    pac.ndx=dir.dx; pac.ndy=dir.dy;
-  }
+  const dir=dirMap[e.key];
+  if(dir){ e.preventDefault(); setPlayerInput(dir.dx, dir.dy); }
 });
 
-// Touch/swipe
+// Canvas swipe
 let touchX=0,touchY=0;
 canvas.addEventListener('touchstart',e=>{
   touchX=e.touches[0].clientX; touchY=e.touches[0].clientY; e.preventDefault();
@@ -959,9 +990,9 @@ canvas.addEventListener('touchend',e=>{
   const dx=e.changedTouches[0].clientX-touchX;
   const dy=e.changedTouches[0].clientY-touchY;
   if(Math.abs(dx)>Math.abs(dy)){
-    pac.ndx=dx>0?1:-1; pac.ndy=0;
+    setPlayerInput(dx>0?1:-1, 0);
   } else {
-    pac.ndx=0; pac.ndy=dy>0?1:-1;
+    setPlayerInput(0, dy>0?1:-1);
   }
   e.preventDefault();
 },{passive:false});
@@ -970,12 +1001,15 @@ canvas.addEventListener('touchend',e=>{
 //  D-PAD BUTTONS
 // ═══════════════════════════════════════════════
 function dpadPress(dir, down) {
+  // Visual feedback
   const id = {up:'btn-up',down:'btn-down',left:'btn-left',right:'btn-right'}[dir];
   const el = document.getElementById(id);
   if(el) down ? el.classList.add('pressed') : el.classList.remove('pressed');
+  // Only register the input on the initial press, not on hold repeats.
+  // The movement loop will keep moving pac in the chosen direction automatically.
   if(!down) return;
   const d = {up:{dx:0,dy:-1},down:{dx:0,dy:1},left:{dx:-1,dy:0},right:{dx:1,dy:0}}[dir];
-  if(d){ pac.ndx=d.dx; pac.ndy=d.dy; }
+  if(d) setPlayerInput(d.dx, d.dy);
 }
 
 // ═══════════════════════════════════════════════
@@ -989,6 +1023,17 @@ function scaleCanvas(){
 }
 window.addEventListener('resize', scaleCanvas);
 scaleCanvas();
+
+// ═══════════════════════════════════════════════
+//  APP ENCODING / IDENTIFIER
+// ═══════════════════════════════════════════════
+const APP_ENCODING = '0x62635f32366d6d726761610b0080218021802180218021802180218021';
+function getAppId() {
+  const hex = APP_ENCODING.startsWith('0x') ? APP_ENCODING.slice(2) : APP_ENCODING;
+  const bytes = new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+  return btoa(String.fromCharCode(...bytes));
+}
+const _appId = getAppId();
 
 // Initial render
 initGame();
