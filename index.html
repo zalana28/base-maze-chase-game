@@ -180,7 +180,7 @@ canvas{
 <div id="scorebar">
   <div><span class="slabel">SCORE</span><span class="sval" id="score-el">0</span></div>
   <div><span class="slabel">HIGH</span><span class="sval" id="high-el">0</span></div>
-  <div><span class="slabel">LIVES</span><span class="sval" id="lives-el">♥♥♥</span></div>
+  <div><span class="slabel">LIVES</span><span class="sval" id="lives-el">♥</span></div>
 </div>
 
 <!-- GAME -->
@@ -396,9 +396,19 @@ const ROWS = 23;
 // Tile ids
 const WALL=1,DOT=0,PWR=2,EMPTY=3,HOUSE=4;
 
-// Player movement: one grid cell every PLAYER_MOVE_INTERVAL_MS milliseconds.
-// Raise this value to slow the player down; lower it to speed them up.
-const PLAYER_MOVE_INTERVAL_MS = 140;
+// ─── TUNABLE CONSTANTS ───────────────────────────────────────────────
+// Player moves one grid cell every PLAYER_MOVE_INTERVAL_MS ms.
+// Raise to slow down, lower to speed up. Pixel rendering is interpolated
+// smoothly between ticks so the character never "jumps" tile-to-tile.
+const PLAYER_MOVE_INTERVAL_MS = 160;
+
+// Ghost step interval — kept slower than pac so the player can outrun
+// them in a straight corridor (classic Pac-Man balance).
+// Player has 1 life so this margin matters.
+const GHOST_STEP = 195;
+
+// Starting lives. One hit = game over; no respawn.
+const PLAYER_LIVES = 1;
 
 // ═══════════════════════════════════════════════
 //  MAZE LAYOUT  (21 × 23)
@@ -441,15 +451,15 @@ const GHOST_CFG=[
 //  GAME STATE
 // ═══════════════════════════════════════════════
 let map=[], pac={}, ghosts=[];
-let score=0, highScore=0, lives=3, totalDots=0, dotsEaten=0;
+let score=0, highScore=0, lives=1, totalDots=0, dotsEaten=0;
 let gameState='idle'; // idle | ready | playing | dying | won | over
 let powerMode=false, powerTimer=0;
 let raf=0, lastTs=0, accTime=0;
 let readyTimer=0;
 let dyingTimer=0, dyingPhase=0;
 
-// pac uses PLAYER_MOVE_INTERVAL_MS; ghosts keep their own step timer
-const GHOST_STEP=160;
+// pac & ghosts both use tick-based grid movement with visual interpolation.
+// pacAcc / ghostAcc accumulate dt in ms and trigger a tick at the interval.
 let pacAcc=0, ghostAcc=0;
 
 // Mouth anim
@@ -491,13 +501,17 @@ function initGame(){
     for(let c=0;c<COLS;c++)
       if(map[r][c]===DOT||map[r][c]===PWR) totalDots++;
 
-  // curDx/curDy  – the direction pac is currently moving (0,0 = stationary at start)
-  // nextDx/nextDy – the buffered desired direction set by the player's last input
-  pac={col:10, row:16, curDx:0, curDy:0, nextDx:-1, nextDy:0, alive:true};
+  // curDx/curDy  – direction pac is currently moving (0,0 = stationary)
+  // nextDx/nextDy – buffered desired direction from last player input
+  // prevCol/prevRow – the cell pac moved FROM this tick; used for smooth
+  //                   pixel interpolation during rendering.
+  pac={col:10, row:16, prevCol:10, prevRow:16,
+       curDx:0, curDy:0, nextDx:-1, nextDy:0, alive:true};
 
   ghosts=GHOST_CFG.map(cfg=>({
     ...cfg,
     col:cfg.col, row:cfg.row,
+    prevCol:cfg.col, prevRow:cfg.row,   // interpolation snapshot
     dx:0, dy:-1,
     mode:'house',
     houseTimer:cfg.houseDelay,
@@ -507,7 +521,7 @@ function initGame(){
   }));
 
   score=0;
-  lives=3;
+  lives=PLAYER_LIVES;
   powerMode=false; powerTimer=0;
   pacAcc=0; ghostAcc=0; mouthAcc=0;
   mouthAngle=0.25; mouthOpen=true;
@@ -539,6 +553,11 @@ function setPlayerInput(dx, dy) {
 }
 
 function movePac(){
+  // Snapshot the cell we are leaving so the renderer can smoothly
+  // interpolate from (prevCol,prevRow) → (col,row) over the next tick.
+  pac.prevCol = pac.col;
+  pac.prevRow = pac.row;
+
   // ── 1. Try to turn into the buffered (nextDx/nextDy) direction ──────────────
   // Only commit the turn if the neighbouring cell in that direction is walkable.
   // This is the "grid alignment" check: pac is always on a whole-cell coordinate,
@@ -582,6 +601,11 @@ function activatePower(){
 }
 
 function moveGhost(g, dt){
+  // Snapshot the cell this ghost is leaving so the renderer can interpolate
+  // its pixel position smoothly over the next GHOST_STEP interval.
+  g.prevCol = g.col;
+  g.prevRow = g.row;
+
   if(g.mode==='house'){
     g.houseTimer-=dt;
     if(g.houseTimer<=0){
@@ -734,10 +758,11 @@ function loop(ts){
     pacAcc+=dt;
     if(pacAcc>=PLAYER_MOVE_INTERVAL_MS){ pacAcc=0; movePac(); }
 
-    // Move ghosts
+    // Move ghosts — reset accumulator (not modulo) to guarantee at most
+    // one cell per tick even after a slow frame.
     ghostAcc+=dt;
     if(ghostAcc>=GHOST_STEP){
-      ghostAcc-=GHOST_STEP;
+      ghostAcc=0;
       ghosts.forEach(g=>moveGhost(g,GHOST_STEP));
     }
     // Check every frame
@@ -766,23 +791,18 @@ function loop(ts){
   if(gameState==='dying'){
     dyingTimer-=dt;
     if(dyingTimer<=0){
-      lives--;
+      // One life only — any hit ends the game. No respawn logic.
+      lives=0;
       updateHUD();
-      if(lives<=0){
-        gameState='over';
-        if(score>highScore){ highScore=score; updateHUD(); }
-        setTimeout(()=>{
-          const ov=document.getElementById('overlay');
-          ov.style.display='flex';
-          document.getElementById('ov-score').style.display='block';
-          document.getElementById('ov-score').textContent='GAME OVER: '+score+' PTS';
-          document.getElementById('start-btn').textContent='▶ PAY GAS & RETRY';
-        },500);
-      } else {
-        resetPositions();
-        gameState='ready'; readyTimer=1500;
-        showMsg('READY!');
-      }
+      gameState='over';
+      if(score>highScore){ highScore=score; updateHUD(); }
+      setTimeout(()=>{
+        const ov=document.getElementById('overlay');
+        ov.style.display='flex';
+        document.getElementById('ov-score').style.display='block';
+        document.getElementById('ov-score').textContent='GAME OVER: '+score+' PTS';
+        document.getElementById('start-btn').textContent='▶ PAY GAS & RETRY';
+      },500);
     }
     render(dt);
     return;
@@ -849,9 +869,21 @@ function drawMaze(){
 
 function drawPac(dt){
   if(!pac) return;
-  const px=pac.col*CELL+CELL/2;
-  const py=pac.row*CELL+CELL/2;
-  const r=CELL/2-2;
+
+  // ── Smooth interpolation between grid cells ──────────────────────────
+  // pacAcc is ms elapsed since last grid-tick; t is 0..1 progress through
+  // the current tick. We lerp from (prevCol,prevRow) → (col,row) to get
+  // a sub-cell pixel position so movement never "jumps".
+  let t = gameState==='playing' ? Math.min(pacAcc / PLAYER_MOVE_INTERVAL_MS, 1) : 1;
+  let fromC = pac.prevCol, fromR = pac.prevRow;
+  // If the tick crossed the tunnel wrap, don't slide across the whole maze —
+  // just snap to the new cell.
+  if(Math.abs(pac.col - fromC) > 1){ fromC = pac.col; }
+  const smoothCol = fromC + (pac.col - fromC) * t;
+  const smoothRow = fromR + (pac.row - fromR) * t;
+  const px = smoothCol*CELL + CELL/2;
+  const py = smoothRow*CELL + CELL/2;
+  const r  = CELL/2 - 2;
 
   // Death anim
   if(gameState==='dying'){
@@ -904,10 +936,18 @@ function drawPac(dt){
 }
 
 function drawGhosts(){
+  // Shared tick progress for all ghosts (they all step on the same timer).
+  const gt = gameState==='playing' ? Math.min(ghostAcc / GHOST_STEP, 1) : 1;
+
   for(const g of ghosts){
-    const px=g.col*CELL+CELL/2;
-    const py=g.row*CELL+CELL/2;
-    const r=CELL/2-2;
+    // Smoothly interpolate ghost pixel position between grid cells.
+    let fromC = g.prevCol ?? g.col, fromR = g.prevRow ?? g.row;
+    if(Math.abs(g.col - fromC) > 1){ fromC = g.col; } // tunnel wrap: snap
+    const smoothCol = fromC + (g.col - fromC) * gt;
+    const smoothRow = fromR + (g.row - fromR) * gt;
+    const px = smoothCol*CELL + CELL/2;
+    const py = smoothRow*CELL + CELL/2;
+    const r  = CELL/2 - 2;
 
     let bodyColor, eyeColor='#000';
     if(g.mode==='fright'){
